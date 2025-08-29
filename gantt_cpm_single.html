@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Gestión de Proyectos — Gantt + CPM con Predecesoras</title>
+<style>
+  :root{ --bg:#0b0f14; --panel:#101720; --panel-2:#0f141c; --ink:#e7eef7; --muted:#9fb1c7;
+    --brand:#4aa3ff; --crit:#ff425f; --ok:#38d39f; --warn:#ffb74d; --grid:#1b2431; --card-radius:18px; --shadow:0 6px 22px rgba(0,0,0,.35); --mono: ui-monospace, Menlo, Consolas, monospace; --sans: system-ui, Segoe UI, Roboto, Helvetica, Arial; }
+  body{margin:0; background:var(--bg); color:var(--ink); font-family:var(--sans)}
+  header{padding:16px; background:#101720; color:var(--ink)}
+  .card{background:linear-gradient(180deg,var(--panel),var(--panel-2)); border-radius:var(--card-radius); padding:16px; margin:10px}
+  table{width:100%; border-collapse:separate; border-spacing:0 6px}
+  thead th{color:var(--muted); font-size:12px; text-align:left}
+  tbody td{background:#0c121b; padding:6px; font-size:13px}
+  .btn{padding:6px 10px; border:none; border-radius:8px; cursor:pointer; background:#152236; color:var(--ink)}
+  .btn.primary{background:#1b3a69}
+  .btn.crit{background:#6b1320}
+  .btn.ok{background:#116a4b}
+  .gantt-wrap{overflow:auto; border:1px solid #172338; border-radius:10px; background:#0c121b}
+  canvas{display:block}
+  .toolbar{display:flex; align-items:center; gap:12px; margin:8px 0}
+  .toolbar label{font-size:13px; color:var(--muted)}
+  .toolbar input[type=range]{width:150px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Gestor Visual de Proyectos · Gantt + CPM</h1>
+</header>
+<main>
+  <section class="card">
+    <h2>1) Cargar tareas</h2>
+    <input id="name" placeholder="Nombre tarea" />
+    <input id="duration" type="number" placeholder="Duración (días)" />
+    <input id="deps" placeholder="Predecesoras (IDs)" />
+    <div>
+      <button class="btn primary" id="addBtn">+ Agregar tarea</button>
+      <button class="btn" id="clearFormBtn">Limpiar</button>
+      <button class="btn ok" id="saveBtn">Guardar</button>
+      <button class="btn" id="loadBtn">Cargar</button>
+      <input id="fileInput" type="file" accept="application/json" style="display:none" />
+      <button class="btn" id="resetBtn">Nuevo</button>
+      <button class="btn" id="demoBtn">Cargar demo</button>
+    </div>
+    <div id="status">Listo.</div>
+  </section>
+  <section class="card">
+    <h2>2) Tareas</h2>
+    <table><thead><tr><th>ID</th><th>Nombre</th><th>Dur</th><th>Predecesoras</th><th>ES</th><th>EF</th><th>LS</th><th>LF</th><th>Holgura</th><th></th></tr></thead>
+    <tbody id="tbody"></tbody></table>
+  </section>
+  <section class="card">
+    <h2>3) Gantt</h2>
+    <div class="toolbar">
+      <label>Zoom: <span id="zoomVal">30</span> px/día</label>
+      <input type="range" id="zoom" min="6" max="80" value="30">
+      <label><input type="checkbox" id="fit" checked> Ajustar a ancho</label>
+    </div>
+    <div class="gantt-wrap"><canvas id="gantt" height="300"></canvas></div>
+  </section>
+</main>
+<script>
+(()=>{
+  class Task{constructor(id,name,duration,deps){this.id=id;this.name=String(name||'').trim();this.duration=Math.max(1,parseInt(duration)||1);this.deps=Array.isArray(deps)?deps.slice():[];this.ES=0;this.EF=0;this.LS=0;this.LF=0;this.slack=0;this.critical=false;}}
+  const state={tasks:[],nextId:1,projectDuration:0,px:30,fit:true};
+  const $=s=>document.querySelector(s); const tbody=$('#tbody'); const canvas=$('#gantt'); const ctx=canvas.getContext('2d'); const statusEl=$('#status');
+  const setStatus=(m,t='info')=>{statusEl.textContent=m; statusEl.style.color=(t==='error')?'#ff8a8a':'var(--muted)'};
+  const parseDeps=str=>!str?[]:str.split(',').map(s=>parseInt(s.trim(),10)).filter(Number.isInteger);
+
+  function addTask(name,dur,depsStr){
+    const deps=parseDeps(depsStr);
+    if(!name){setStatus('Nombre requerido','error');return}
+    if(!dur||isNaN(dur)||parseInt(dur)<=0){setStatus('Duración inválida','error');return}
+    for(const d of deps){if(!state.tasks.find(t=>t.id===d)){setStatus(\`Predecesora \${d} no existe\`,'error');return}}
+    const t=new Task(state.nextId++,name,parseInt(dur),deps); state.tasks.push(t); recomputeAndRender(); setStatus(\`Agregada \${t.name} (ID \${t.id})\`);
+  }
+
+  function deleteTask(id){const i=state.tasks.findIndex(t=>t.id===id); if(i<0)return; state.tasks.splice(i,1); for(const t of state.tasks){t.deps=t.deps.filter(d=>d!==id)} recomputeAndRender(); setStatus(\`Tarea \${id} eliminada\`)}
+  function resetAll(){state.tasks=[];state.nextId=1;state.projectDuration=0;recomputeAndRender();setStatus('Proyecto reiniciado')}
+
+  function computeSchedule(){
+    const tasks=state.tasks; const byId=new Map(tasks.map(t=>[t.id,t])); const succ=new Map(tasks.map(t=>[t.id,[]])); const indeg=new Map(tasks.map(t=>[t.id,0]));
+    for(const t of tasks){for(const d of t.deps){if(!byId.has(d)) throw new Error(\`Predecesora inexistente \${d}\`); succ.get(d).push(t.id); indeg.set(t.id,(indeg.get(t.id)||0)+1)}}
+    const q=[]; for(const [id,deg] of indeg){if(deg===0) q.push(id)}
+    const topo=[]; while(q.length){const v=q.shift(); topo.push(v); for(const w of succ.get(v)){indeg.set(w,indeg.get(w)-1); if(indeg.get(w)===0) q.push(w)}}
+    if(topo.length!==tasks.length) throw new Error('Ciclo detectado en predecesoras');
+    for(const id of topo){const t=byId.get(id); let es=0; for(const d of t.deps){es=Math.max(es, byId.get(d).EF)} t.ES=es; t.EF=es+t.duration}
+    const makespan=Math.max(0,...tasks.map(t=>t.EF));
+    for(let i=topo.length-1;i>=0;i--){const t=byId.get(topo[i]); const su=succ.get(t.id); const lf=su.length?Math.min(...su.map(sid=>byId.get(sid).LS)):makespan; t.LF=lf; t.LS=lf-t.duration; t.slack=t.LS-t.ES; t.critical=Math.abs(t.slack)<1e-9}
+    state.projectDuration=makespan;
+  }
+
+  function renderTable(){
+    tbody.innerHTML='';
+    if(!state.tasks.length){tbody.innerHTML='<tr><td colspan="10" style="color:var(--muted)">Sin tareas</td></tr>';return}
+    for(const t of [...state.tasks].sort((a,b)=>a.id-b.id)){
+      const tr=document.createElement('tr');
+      tr.innerHTML=\`<td>\${t.id}</td><td>\${t.name}</td><td>\${t.duration}</td><td>\${t.deps.join(',')||'—'}</td>
+      <td>\${t.ES}</td><td>\${t.EF}</td><td>\${t.LS}</td><td>\${t.LF}</td><td>\${t.critical?'<b style=\"color:#ff425f\">0</b>':t.slack}</td>\`;
+      const td=document.createElement('td'); const b=document.createElement('button'); b.className='btn crit'; b.textContent='Eliminar'; b.onclick=()=>deleteTask(t.id); td.appendChild(b); tr.appendChild(td); tbody.appendChild(tr);
+    }
+  }
+
+  function renderGantt(){
+    const rows=state.tasks.length||1, rowH=30, left=150, total=state.projectDuration||1;
+    const container=document.querySelector('.gantt-wrap');
+    let px = state.fit ? Math.max(6, Math.min(80, Math.floor(((container?.clientWidth||600)-left-40)/(total+2)))) : state.px;
+    state.px=px;
+    document.getElementById('zoomVal').textContent=px;
+    document.getElementById('zoom').value=px;
+    document.getElementById('fit').checked=state.fit;
+
+    const width=left+(total+2)*px, height=rows*rowH+60; canvas.width=width; canvas.height=height;
+    ctx.fillStyle='#111'; ctx.fillRect(0,0,width,height);
+    ctx.font='12px sans-serif';
+
+    for(let d=0; d<=total; d++){
+      const x=left+d*px+0.5; ctx.strokeStyle=(d%5===0)?'#2a2a2a':'#1a1a1a';
+      ctx.beginPath(); ctx.moveTo(x,5); ctx.lineTo(x,height-25); ctx.stroke();
+      if(d%5===0){ctx.fillStyle='#cfd2d6'; ctx.fillText(String(d), x-3, 16)}
+    }
+
+    const sorted=[...state.tasks].sort((a,b)=>a.id-b.id);
+    const pos=new Map(); let i=0;
+    for(const t of sorted){
+      const y=25+i*rowH;
+      ctx.strokeStyle='#1d1d1d'; ctx.beginPath(); ctx.moveTo(0,y+12); ctx.lineTo(width,y+12); ctx.stroke();
+      ctx.fillStyle='#fff'; ctx.fillText(\`#\${t.id} \${t.name}\`,10,y+12);
+      const x0 = left + t.ES*px; const w = Math.max(10, t.duration*px); const x1=x0+w;
+      ctx.fillStyle = t.critical ? '#f44' : '#4af'; ctx.fillRect(x0, y, w, 20);
+      ctx.fillStyle='#fff'; ctx.font='11px monospace'; ctx.fillText(\`\${t.ES}→\${t.EF}\`, x0+4, y+15); ctx.font='12px sans-serif';
+      pos.set(t.id,{x0,x1,y:y+10}); i++;
+    }
+
+    ctx.lineWidth=1;
+    for(const t of sorted){
+      const target=pos.get(t.id); if(!target) continue;
+      for(const d of t.deps){ const source=pos.get(d); if(!source) continue;
+        const xStart=source.x1, yStart=source.y; const xEnd=target.x0, yEnd=target.y; const midX=Math.min(xStart+18,(xStart+xEnd)/2);
+        ctx.strokeStyle='#7aa8ff'; ctx.beginPath(); ctx.moveTo(xStart,yStart); ctx.lineTo(midX,yStart); ctx.lineTo(midX,yEnd); ctx.lineTo(xEnd-6,yEnd); ctx.stroke();
+        ctx.fillStyle='#7aa8ff'; ctx.beginPath(); ctx.moveTo(xEnd-6,yEnd-4); ctx.lineTo(xEnd,yEnd); ctx.lineTo(xEnd-6,yEnd+4); ctx.closePath(); ctx.fill();
+      }
+    }
+
+    const endX=left+total*px+0.5; ctx.strokeStyle='#f884'; ctx.beginPath(); ctx.moveTo(endX,0); ctx.lineTo(endX,height-22); ctx.stroke();
+    const hasCritical=state.tasks.some(t=>t.critical); const badgeW=110, badgeH=20, badgeX=endX-badgeW/2, badgeY=height-24;
+    ctx.fillStyle=hasCritical?'#f44':'#4af'; ctx.fillRect(badgeX,badgeY,badgeW,badgeH); ctx.fillStyle='#fff'; ctx.font='12px sans-serif'; ctx.fillText(\`Fin: día \${total}\`, badgeX+10, badgeY+14);
+  }
+
+  function recomputeAndRender(){try{if(state.tasks.length) computeSchedule(); else state.projectDuration=0; renderTable(); renderGantt();}catch(e){setStatus(e.message,'error')}}
+
+  document.getElementById('addBtn').onclick=()=>addTask(document.getElementById('name').value,document.getElementById('duration').value,document.getElementById('deps').value);
+  document.getElementById('clearFormBtn').onclick=()=>{document.getElementById('name').value=document.getElementById('duration').value=document.getElementById('deps').value=''; setStatus('Formulario limpio')};
+  document.getElementById('saveBtn').onclick=()=>{const data={tasks:state.tasks.map(t=>({id:t.id,name:t.name,duration:t.duration,deps:t.deps}))}; const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=\`proyecto-\${new Date().toISOString().slice(0,10)}.json\`; a.click(); setStatus('Guardado en JSON')};
+  document.getElementById('loadBtn').onclick=()=>document.getElementById('fileInput').click();
+  document.getElementById('fileInput').onchange=e=>{if(e.target.files&&e.target.files[0]){const r=new FileReader();r.onload=()=>{try{const obj=JSON.parse(r.result);if(!obj||!Array.isArray(obj.tasks)) throw new Error('Formato inválido'); state.tasks=obj.tasks.map(o=>new Task(o.id,o.name,o.duration,o.deps)); state.nextId=Math.max(0,...state.tasks.map(t=>t.id))+1; recomputeAndRender(); setStatus('Proyecto cargado')}catch(err){setStatus('Error JSON: '+err.message,'error')}}; r.readAsText(e.target.files[0])}};
+  document.getElementById('resetBtn').onclick=()=>{if(confirm('¿Vaciar proyecto?')) resetAll()};
+  document.getElementById('demoBtn').onclick=()=>{if(state.tasks.length && !confirm('Esto reemplazará el proyecto actual. ¿Continuar?')) return; resetAll(); const demo=[{name:'Inicio',duration:1,deps:[]},{name:'Diseño',duration:3,deps:[1]},{name:'Backend',duration:4,deps:[1]},{name:'Frontend',duration:3,deps:[2]},{name:'Integración',duration:2,deps:[3,4]},{name:'QA',duration:2,deps:[5]},{name:'Release',duration:1,deps:[6]}]; for(const d of demo){state.tasks.push(new Task(state.nextId++,d.name,d.duration,d.deps))} recomputeAndRender(); setStatus(\`Demo cargada. Duración total: \${state.projectDuration} días.\`); alert(\`Demo cargada\nDuración total del proyecto: \${state.projectDuration} días\`)};
+
+  document.getElementById('zoom').addEventListener('input',e=>{state.px=parseInt(e.target.value,10)||30; state.fit=false; renderGantt()});
+  document.getElementById('fit').addEventListener('change',e=>{state.fit=!!e.target.checked; renderGantt()});
+
+  window.onresize=()=>{if(state.fit) renderGantt()};
+  recomputeAndRender();
+})();
+</script>
+</body>
+</html>
