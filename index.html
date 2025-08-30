@@ -104,8 +104,11 @@
 
   function renderGantt(){
     const rows=state.tasks.length||1, rowH=30, left=150, total=state.projectDuration||1;
-    const container=document.querySelector('.gantt-wrap');
-    let px = state.fit ? Math.max(6, Math.min(80, Math.floor(((container?.clientWidth||600)-left-40)/(total+2)))) : state.px;
+    const container = document.querySelector('.gantt-wrap');
+    const containerWidth = container ? container.clientWidth : 600;
+    let px = state.fit
+      ? Math.max(6, Math.min(80, Math.floor((containerWidth - left - 40) / (total + 2))))
+      : state.px;
     state.px=px;
     document.getElementById('zoomVal').textContent=px;
     document.getElementById('zoom').value=px;
